@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PDF Quote Extractor</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>PDF Quote Extractor</h1>
+            <p>Upload a Daily Quote Review PDF and search by any column</p>
+        </header>
+
+        <section class="upload-section">
+            <div class="upload-area" id="uploadArea">
+                <input type="file" id="fileInput" accept=".pdf" hidden>
+                <div class="upload-content">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                        <polyline points="17 8 12 3 7 8"/>
+                        <line x1="12" y1="3" x2="12" y2="15"/>
+                    </svg>
+                    <p>Click or drag PDF file here to upload</p>
+                    <span class="file-name" id="fileName"></span>
+                </div>
+            </div>
+            <button class="btn btn-primary" id="uploadBtn" disabled>Upload & Extract</button>
+        </section>
+
+        <section class="search-section" id="searchSection" style="display: none;">
+            <div class="search-controls">
+                <div class="form-group">
+                    <label for="columnSelect">Search Column:</label>
+                    <select id="columnSelect">
+                        <option value="">-- Select Column --</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="searchInput">Search Value:</label>
+                    <input type="text" id="searchInput" placeholder="Enter search value...">
+                </div>
+                <button class="btn btn-secondary" id="searchBtn">Search</button>
+                <button class="btn btn-outline" id="clearBtn">Clear Filter</button>
+            </div>
+        </section>
+
+        <section class="results-section" id="resultsSection" style="display: none;">
+            <div class="results-header">
+                <h2>Results</h2>
+                <span class="result-count" id="resultCount"></span>
+            </div>
+            <div class="table-wrapper">
+                <table id="resultsTable">
+                    <thead id="tableHead"></thead>
+                    <tbody id="tableBody"></tbody>
+                </table>
+            </div>
+        </section>
+
+        <div class="loading" id="loading" style="display: none;">
+            <div class="spinner"></div>
+            <p>Processing PDF...</p>
+        </div>
+
+        <div class="message" id="message" style="display: none;"></div>
+    </div>
+
+    <script>
+        // Store extracted data globally
+        let extractedData = {
+            headers: [],
+            rows: []
+        };
+
+        // DOM Elements
+        const uploadArea = document.getElementById('uploadArea');
+        const fileInput = document.getElementById('fileInput');
+        const fileName = document.getElementById('fileName');
+        const uploadBtn = document.getElementById('uploadBtn');
+        const searchSection = document.getElementById('searchSection');
+        const resultsSection = document.getElementById('resultsSection');
+        const columnSelect = document.getElementById('columnSelect');
+        const searchInput = document.getElementById('searchInput');
+        const searchBtn = document.getElementById('searchBtn');
+        const clearBtn = document.getElementById('clearBtn');
+        const tableHead = document.getElementById('tableHead');
+        const tableBody = document.getElementById('tableBody');
+        const resultCount = document.getElementById('resultCount');
+        const loading = document.getElementById('loading');
+        const message = document.getElementById('message');
+
+        // File upload area click handler
+        uploadArea.addEventListener('click', () => fileInput.click());
+
+        // Drag and drop handlers
+        uploadArea.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            uploadArea.classList.add('dragover');
+        });
+
+        uploadArea.addEventListener('dragleave', () => {
+            uploadArea.classList.remove('dragover');
+        });
+
+        uploadArea.addEventListener('drop', (e) => {
+            e.preventDefault();
+            uploadArea.classList.remove('dragover');
+            const files = e.dataTransfer.files;
+            if (files.length > 0 && files[0].type === 'application/pdf') {
+                fileInput.files = files;
+                handleFileSelect(files[0]);
+            }
+        });
+
+        // File input change handler
+        fileInput.addEventListener('change', (e) => {
+            if (e.target.files.length > 0) {
+                handleFileSelect(e.target.files[0]);
+            }
+        });
+
+        function handleFileSelect(file) {
+            fileName.textContent = file.name;
+            uploadBtn.disabled = false;
+            uploadArea.classList.add('has-file');
+        }
+
+        // Upload button click handler
+        uploadBtn.addEventListener('click', async () => {
+            const file = fileInput.files[0];
+            if (!file) return;
+
+            const formData = new FormData();
+            formData.append('file', file);
+
+            showLoading(true);
+            hideMessage();
+
+            try {
+                const response = await fetch('/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const data = await response.json();
+
+                if (data.error) {
+                    showMessage(data.error, 'error');
+                    return;
+                }
+
+                // Store the extracted data
+                extractedData.headers = data.headers;
+                extractedData.rows = data.rows;
+
+                // Populate column dropdown
+                populateColumnSelect(data.headers);
+
+                // Show search section
+                searchSection.style.display = 'block';
+
+                // Display all data initially
+                displayResults(data.rows);
+
+                showMessage(`Successfully extracted ${data.total_rows} rows from PDF`, 'success');
+            } catch (error) {
+                showMessage('Error uploading file: ' + error.message, 'error');
+            } finally {
+                showLoading(false);
+            }
+        });
+
+        function populateColumnSelect(headers) {
+            columnSelect.innerHTML = '<option value="">-- Select Column --</option>';
+            headers.forEach(header => {
+                const option = document.createElement('option');
+                option.value = header;
+                option.textContent = header;
+                columnSelect.appendChild(option);
+            });
+        }
+
+        // Search button click handler
+        searchBtn.addEventListener('click', performSearch);
+        searchInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') performSearch();
+        });
+
+        async function performSearch() {
+            const column = columnSelect.value;
+            const value = searchInput.value.trim();
+
+            if (!column) {
+                showMessage('Please select a column to search', 'error');
+                return;
+            }
+
+            // Filter locally for better performance
+            const results = extractedData.rows.filter(row => {
+                const cellValue = String(row[column] || '').toLowerCase();
+                return cellValue.includes(value.toLowerCase());
+            });
+
+            displayResults(results);
+        }
+
+        // Clear button click handler
+        clearBtn.addEventListener('click', () => {
+            searchInput.value = '';
+            columnSelect.value = '';
+            displayResults(extractedData.rows);
+        });
+
+        function displayResults(rows) {
+            resultsSection.style.display = 'block';
+            resultCount.textContent = `${rows.length} row(s) found`;
+
+            // Build table header
+            tableHead.innerHTML = '';
+            const headerRow = document.createElement('tr');
+            extractedData.headers.forEach(header => {
+                const th = document.createElement('th');
+                th.textContent = header;
+                headerRow.appendChild(th);
+            });
+            tableHead.appendChild(headerRow);
+
+            // Build table body
+            tableBody.innerHTML = '';
+            rows.forEach(row => {
+                const tr = document.createElement('tr');
+                extractedData.headers.forEach(header => {
+                    const td = document.createElement('td');
+                    td.textContent = row[header] || '';
+                    tr.appendChild(td);
+                });
+                tableBody.appendChild(tr);
+            });
+
+            // Scroll to results
+            resultsSection.scrollIntoView({ behavior: 'smooth' });
+        }
+
+        function showLoading(show) {
+            loading.style.display = show ? 'flex' : 'none';
+        }
+
+        function showMessage(text, type) {
+            message.textContent = text;
+            message.className = `message ${type}`;
+            message.style.display = 'block';
+            setTimeout(() => {
+                message.style.display = 'none';
+            }, 5000);
+        }
+
+        function hideMessage() {
+            message.style.display = 'none';
+        }
+    </script>
+</body>
+</html>
