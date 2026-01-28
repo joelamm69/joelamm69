@@ -134,51 +134,182 @@ def parse_quote_review_pdf(pdf_path):
 def smart_extract_pdf(pdf_path):
     """
     Smart extraction that tries multiple methods to get the best data.
+    Uses text-based parsing optimized for Daily Quote Review PDFs.
     """
+    import re
+
     headers = [
         'Quote #', 'PartNum', 'Description', 'Vendor', 'Qty',
         'AddDate', 'Exp. Close', 'Added By', 'State', 'Customer Name',
         'ListEach', 'Ext_Price', 'Summary', 'Milestone'
     ]
 
+    # US State abbreviations for parsing
+    states = ['AL', 'AK', 'AZ', 'AR', 'CA', 'CO', 'CT', 'DE', 'FL', 'GA',
+              'HI', 'ID', 'IL', 'IN', 'IA', 'KS', 'KY', 'LA', 'ME', 'MD',
+              'MA', 'MI', 'MN', 'MS', 'MO', 'MT', 'NE', 'NV', 'NH', 'NJ',
+              'NM', 'NY', 'NC', 'ND', 'OH', 'OK', 'OR', 'PA', 'RI', 'SC',
+              'SD', 'TN', 'TX', 'UT', 'VT', 'VA', 'WA', 'WV', 'WI', 'WY', 'DC']
+
     rows = []
 
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
-            # Try table extraction first
-            tables = page.extract_tables()
+            # Extract text from the page
+            text = page.extract_text()
+            if not text:
+                continue
 
-            for table in tables:
-                if not table:
+            lines = text.split('\n')
+
+            for line in lines:
+                line = line.strip()
+                if not line:
                     continue
 
-                for row in table:
-                    if not row:
-                        continue
+                # Skip non-data lines
+                if 'DAILY QUOTE REVIEW' in line:
+                    continue
+                if 'Printed:' in line:
+                    continue
+                if 'Quote #' in line and 'PartNum' in line:
+                    continue
+                if 'Quote Type:' in line:
+                    continue
+                if 'Total After Discount' in line:
+                    continue
+                if line.startswith('CRM Total'):
+                    continue
+                if 'Quote Ext. Price' in line:
+                    continue
 
-                    # Clean the row
-                    cleaned = [str(cell).strip() if cell else '' for cell in row]
+                # Check if line starts with a quote number (7 digits)
+                match = re.match(r'^(\d{7})\s+(.+)$', line)
+                if not match:
+                    continue
 
-                    # Skip if it's a header row or empty
-                    if 'Quote #' in cleaned or 'PartNum' in cleaned:
-                        continue
-                    if not any(cleaned):
-                        continue
+                quote_num = match.group(1)
+                rest_of_line = match.group(2)
 
-                    # Skip summary/total rows
-                    first_cell = cleaned[0] if cleaned else ''
-                    if 'Total' in first_cell or 'Quote Type' in first_cell:
-                        continue
+                # Skip "Quote Type:" lines
+                if rest_of_line.startswith('Quote Type:'):
+                    continue
 
-                    # Check if first cell looks like a quote number (6+ digits)
-                    if first_cell.isdigit() and len(first_cell) >= 6:
-                        row_dict = {}
-                        for i, header in enumerate(headers):
-                            if i < len(cleaned):
-                                row_dict[header] = cleaned[i]
-                            else:
-                                row_dict[header] = ''
-                        rows.append(row_dict)
+                # Parse the rest of the line
+                row_dict = {'Quote #': quote_num}
+
+                # Try to extract fields using patterns
+                # Pattern: PartNum, Description, Vendor, Qty, AddDate, Exp.Close, AddedBy, State, CustomerName, ListEach, Ext_Price, Summary, Milestone
+
+                # Find dates (pattern: M/DD/YY or MM/DD/YY)
+                date_pattern = r'\d{1,2}/\d{1,2}/\d{2}'
+                dates = re.findall(date_pattern, rest_of_line)
+
+                # Find prices (pattern: number with comma and decimal like 1,234.56 or 0.00)
+                price_pattern = r'[\d,]+\.\d{2}'
+                prices = re.findall(price_pattern, rest_of_line)
+
+                # Find state - look for 2-letter state code
+                state_found = ''
+                for state in states:
+                    # Look for state code that appears after a name (preceded by letter, followed by space or end)
+                    state_match = re.search(r'[a-zA-Z](' + state + r')(?:\s|$)', rest_of_line)
+                    if state_match:
+                        state_found = state
+                        break
+
+                # Find milestone (usually "Incomplete - X%")
+                milestone_match = re.search(r'(Incomplete\s*-\s*\d+%|Complete\s*-\s*\d+%)', rest_of_line, re.IGNORECASE)
+                milestone = milestone_match.group(1) if milestone_match else ''
+
+                # Extract part number (alphanumeric, right after quote number)
+                parts = rest_of_line.split()
+                if parts:
+                    row_dict['PartNum'] = parts[0]
+
+                # Try to find vendor code (usually 3-5 chars like AVA-C, ADT)
+                vendor_match = re.search(r'\s([A-Z]{2,5}(?:-[A-Z])?)\s+\d+\s+\d{1,2}/', rest_of_line)
+                if vendor_match:
+                    row_dict['Vendor'] = vendor_match.group(1)
+
+                    # Find quantity (number before dates)
+                    qty_match = re.search(r'\s([A-Z]{2,5}(?:-[A-Z])?)\s+(\d+)\s+\d{1,2}/', rest_of_line)
+                    if qty_match:
+                        row_dict['Qty'] = qty_match.group(2)
+
+                # Assign dates
+                if len(dates) >= 1:
+                    row_dict['AddDate'] = dates[0]
+                if len(dates) >= 2:
+                    row_dict['Exp. Close'] = dates[1]
+
+                # Assign prices
+                if len(prices) >= 1:
+                    row_dict['ListEach'] = prices[-2] if len(prices) >= 2 else prices[0]
+                if len(prices) >= 2:
+                    row_dict['Ext_Price'] = prices[-1]
+
+                row_dict['State'] = state_found
+                row_dict['Milestone'] = milestone
+
+                # Try to extract description (between part number and vendor)
+                if 'Vendor' in row_dict and row_dict['PartNum']:
+                    desc_match = re.search(
+                        re.escape(row_dict['PartNum']) + r'\s+(.+?)\s+' + re.escape(row_dict.get('Vendor', '')),
+                        rest_of_line
+                    )
+                    if desc_match:
+                        row_dict['Description'] = desc_match.group(1).strip()
+
+                # Try to extract customer name (between state and prices)
+                if state_found and prices:
+                    # Find text between state and first price
+                    customer_pattern = state_found + r'\s+(.+?)\s+[\d,]+\.\d{2}'
+                    customer_match = re.search(customer_pattern, rest_of_line)
+                    if customer_match:
+                        row_dict['Customer Name'] = customer_match.group(1).strip()
+
+                # Try to extract Added By (text before state)
+                if state_found:
+                    # Look for name pattern before state (usually FirstName LastName or FirstName LastNameState)
+                    added_by_match = re.search(r'(\d{1,2}/\d{1,2}/\d{2})\s+([A-Za-z]+\s+[A-Za-z\s]+?)' + state_found, rest_of_line)
+                    if added_by_match:
+                        row_dict['Added By'] = added_by_match.group(2).strip()
+
+                # Extract summary (usually alphanumeric code before milestone)
+                if milestone:
+                    summary_match = re.search(r'([\w\d\-#]+)\s+' + re.escape(milestone), rest_of_line)
+                    if summary_match:
+                        row_dict['Summary'] = summary_match.group(1)
+
+                # Fill in any missing headers with empty string
+                for header in headers:
+                    if header not in row_dict:
+                        row_dict[header] = ''
+
+                rows.append(row_dict)
+
+    # If text extraction found nothing, try table extraction as fallback
+    if not rows:
+        with pdfplumber.open(pdf_path) as pdf:
+            for page in pdf.pages:
+                tables = page.extract_tables()
+                for table in tables:
+                    if not table:
+                        continue
+                    for row in table:
+                        if not row:
+                            continue
+                        cleaned = [str(cell).strip() if cell else '' for cell in row]
+                        first_cell = cleaned[0] if cleaned else ''
+                        if first_cell.isdigit() and len(first_cell) >= 6:
+                            row_dict = {}
+                            for i, header in enumerate(headers):
+                                if i < len(cleaned):
+                                    row_dict[header] = cleaned[i]
+                                else:
+                                    row_dict[header] = ''
+                            rows.append(row_dict)
 
     return headers, rows
 
